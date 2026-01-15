@@ -99,22 +99,34 @@ def get_cached_ticker_data(symbol, period):
 # Sidebar
 st.sidebar.header("Analysis Parameters")
 
+# Sidebar Helper to change symbol and clear search
+def set_symbol(new_sym):
+    st.session_state.current_symbol = new_sym
+    # Reset search inputs if keys are used
+    if 'search_input' in st.session_state:
+        st.session_state.search_input = ""
+    st.rerun()
+
 # Search with Suggestions
-search_query = st.sidebar.text_input("Search Company or Ticker", placeholder="e.g. Reliance, Apple...")
+search_query = st.sidebar.text_input("Search Company or Ticker", placeholder="e.g. Reliance, Apple...", key="search_input")
 if search_query:
     suggestions = search_stocks(search_query)
     if suggestions:
         options = [f"{s['name']} ({s['symbol']})" for s in suggestions]
-        selected_option = st.sidebar.selectbox("Select a company", options, index=0)
-        # Extract symbol from "Name (SYMBOL)"
-        new_symbol = selected_option.split('(')[-1].strip(')')
-        if new_symbol != st.session_state.current_symbol:
-            st.session_state.current_symbol = new_symbol
-            st.rerun()
+        selected_option = st.sidebar.selectbox("Select a company", options, index=None, placeholder="Choose a result...", key="search_select")
+        if selected_option:
+            # Extract symbol from "Name (SYMBOL)"
+            new_symbol = selected_option.split('(')[-1].strip(')')
+            if new_symbol != st.session_state.current_symbol:
+                set_symbol(new_symbol)
+    
+    if st.sidebar.button("Clear Search"):
+        st.session_state.search_input = ""
+        st.rerun()
 
-symbol = st.sidebar.text_input("Active Ticker", value=st.session_state.current_symbol).upper().strip()
-if symbol != st.session_state.current_symbol:
-    st.session_state.current_symbol = symbol
+symbol_input = st.sidebar.text_input("Active Ticker", value=st.session_state.current_symbol).upper().strip()
+if symbol_input != st.session_state.current_symbol:
+    st.session_state.current_symbol = symbol_input
 
 period = st.sidebar.selectbox("History Period", ["1mo", "3mo", "6mo", "1y", "2y"])
 
@@ -210,18 +222,16 @@ with col_market:
         if gainers:
             st.write("🚀 **Top Gainers**")
             for g in gainers[:5]:
-                if st.button(f"{g['symbol']} (+{g['change']:.1f}%)", key=f"btn_gain_{g['symbol']}"):
-                    st.session_state.current_symbol = g['symbol']
-                    st.rerun()
+                if st.button(f"{g['symbol']} (+{g['change']:.1f}%)", key=f"btn_gain_{g['symbol']}", use_container_width=True):
+                    set_symbol(g['symbol'])
         
         st.write("---")
         
         if losers:
             st.write("📉 **Top Losers**")
             for l in losers[:5]:
-                if st.button(f"{l['symbol']} ({l['change']:.1f}%)", key=f"btn_lose_{l['symbol']}"):
-                    st.session_state.current_symbol = l['symbol']
-                    st.rerun()
+                if st.button(f"{l['symbol']} ({l['change']:.1f}%)", key=f"btn_lose_{l['symbol']}", use_container_width=True):
+                    set_symbol(l['symbol'])
 
 # Sidebar footer
 st.sidebar.markdown("---")

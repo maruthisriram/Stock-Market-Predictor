@@ -141,7 +141,7 @@ with col_main:
                     """, unsafe_allow_html=True)
 
                     # Content Tabs
-                    tab_c, tab_n, tab_s = st.tabs(["📊 Technical Chart", "📰 Logic Source News", "🌐 Sector Analysis"])
+                    tab_c, tab_n, tab_s = st.tabs(["📊 Technical Chart", "🌐 Meaning-aware Logic", "📈 Sector Analysis"])
                     
                     with tab_c:
                         fig = go.Figure()

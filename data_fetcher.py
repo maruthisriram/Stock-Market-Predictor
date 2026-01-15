@@ -2,6 +2,27 @@ import yfinance as yf
 import pandas as pd
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 from datetime import datetime, timedelta
+import numpy as np
+try:
+    from transformers import pipeline
+except ImportError:
+    pipeline = None
+
+# Global model initialization for sentiment
+FINBERT_PIPE = None
+
+def get_finbert_pipeline():
+    global FINBERT_PIPE
+    if pipeline is None:
+        return None
+    if FINBERT_PIPE is None:
+        try:
+            print("Initializing FinBERT model (Meaning-aware Analysis)...")
+            FINBERT_PIPE = pipeline("sentiment-analysis", model="ProsusAI/finbert")
+        except Exception as e:
+            print(f"Error loading FinBERT: {e}")
+            return None
+    return FINBERT_PIPE
 
 def fetch_historical_data(symbol, period="1mo", interval="1d"):
     """
@@ -39,47 +60,66 @@ def search_stocks(query):
 
 def fetch_news_sentiment(symbol):
     """
-    Fetch recent news using yfinance and calculate average sentiment score.
+    Fetch recent news and calculate average sentiment score using FinBERT (meaning-aware).
     """
     try:
         print(f"Fetching news for {symbol}...")
         ticker = yf.Ticker(symbol)
         news = getattr(ticker, 'news', [])
         
-        # Debugging news structure
         if not news:
-            print(f"No news found for {symbol} using yfinance.")
+            print(f"No news found for {symbol}.")
             return 0, []
 
-        analyzer = SentimentIntensityAnalyzer()
+        # Try to get FinBERT pipeline
+        nlp = get_finbert_pipeline()
+        vader_analyzer = SentimentIntensityAnalyzer() if nlp is None else None
+        
         sentiments = []
         news_list = []
 
         for article in news:
-            # Check for multiple levels of nesting
             content = article.get('content', {})
-            # If no content dict, use the article itself
             data_source = content if content else article
 
-            # Title extraction - highly robust
-            title = data_source.get('title') or data_source.get('headline') or article.get('title') or article.get('headline')
+            title = data_source.get('title') or article.get('title') or ""
+            summary = data_source.get('summary') or data_source.get('description') or ""
+            
             if not title:
                 continue
                 
-            # Publisher extraction
-            publisher = data_source.get('publisher') or data_source.get('source') or article.get('publisher') or article.get('source') or "Market News"
+            # Combine title and summary for better context
+            combined_text = f"{title}. {summary}".strip()
             
-            # Link extraction - prioritize the actual article URL
-            link = data_source.get('link') or data_source.get('url') or data_source.get('previewUrl') or article.get('link') or article.get('url') or "#"
+            publisher = data_source.get('publisher') or article.get('publisher') or "Market News"
+            link = data_source.get('link') or data_source.get('url') or "#"
             
-            # Some versions might have a 'clickThroughUrl' dictionary
             if isinstance(link, dict):
                 link = link.get('url', '#')
             
-            # Basic sentiment analysis on the title
-            score = analyzer.polarity_scores(title)['compound']
+            score = 0
+            if nlp:
+                # Meaning-aware analysis
+                try:
+                    # Truncate text for Bert (max 512 tokens approx)
+                    result = nlp(combined_text[:500])[0]
+                    label = result['label'].lower() # positive, negative, neutral
+                    confidence = result['score']
+                    
+                    if label == 'positive':
+                        score = confidence
+                    elif label == 'negative':
+                        score = -confidence
+                    else:
+                        score = 0
+                except:
+                    # Fallback to VADER on title if model fails
+                    score = SentimentIntensityAnalyzer().polarity_scores(title)['compound']
+            else:
+                # Fallback to VADER
+                score = vader_analyzer.polarity_scores(title)['compound']
+                
             sentiments.append(score)
-            
             news_list.append({
                 'title': title,
                 'publisher': publisher,
@@ -88,7 +128,7 @@ def fetch_news_sentiment(symbol):
             })
 
         avg_sentiment = sum(sentiments) / len(sentiments) if sentiments else 0
-        print(f"Fetched {len(news_list)} news articles for {symbol}. Avg Sentiment: {avg_sentiment}")
+        print(f"Analyzed {len(news_list)} news articles for {symbol}. Contextual Sentiment: {avg_sentiment:.2f}")
         return avg_sentiment, news_list
     except Exception as e:
         print(f"Error fetching news for {symbol}: {e}")
@@ -181,7 +221,11 @@ if __name__ == "__main__":
         print(f"Fetched {len(hist)} rows of historical data.")
     
     avg_sent, news = fetch_news_sentiment(test_symbol)
+    if news:
+        print(f"Sample news sentiment analysis for {test_symbol}:")
+        for i, item in enumerate(news[:3]):
+            print(f"{i+1}. {item['title']} -> Sentiment Score: {item['sentiment']:.2f}")
     
     gainers, losers = get_market_movers()
-    print(f"Top Gainer: {gainers[0] if gainers else 'None'}")
-    print(f"Top Loser: {losers[0] if losers else 'None'}")
+    print(f"Top Gainer: {gainers[0]['symbol'] if gainers else 'None'}")
+    print(f"Top Loser: {losers[0]['symbol'] if losers else 'None'}")

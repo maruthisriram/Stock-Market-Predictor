@@ -42,9 +42,16 @@ class BaseFetcher(ABC):
         if BaseFetcher._shared_finbert is None:
             try:
                 print("Initializing FinBERT model (Shared)...")
-                BaseFetcher._shared_finbert = pipeline("sentiment-analysis", model="ProsusAI/finbert")
+                # Securely fetch token from Streamlit secrets or Env (GitHub blocks hardcoded tokens)
+                import streamlit as st
+                auth_token = None
+                try: auth_token = st.secrets.get("HF_TOKEN")
+                except: pass
+                
+                BaseFetcher._shared_finbert = pipeline("sentiment-analysis", model="ProsusAI/finbert", token=auth_token)
             except Exception as e:
-                print(f"Error loading FinBERT: {e}")
+                print(f"FinBERT initialization failed details: {e}")
+                BaseFetcher._shared_finbert = None
                 return None
         return BaseFetcher._shared_finbert
 

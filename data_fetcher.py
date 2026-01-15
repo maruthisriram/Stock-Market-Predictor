@@ -102,11 +102,53 @@ def fetch_news_sentiment(symbol):
     try:
         print(f"Fetching news for {symbol}...")
         ticker = yf.Ticker(symbol)
+        
+        # Get company name for better filtering
+        company_name = symbol
+        try:
+            info = ticker.info
+            company_name = info.get('longName') or info.get('shortName') or symbol
+        except:
+            pass
+            
         news = getattr(ticker, 'news', [])
         
         if not news:
             print(f"No news found for {symbol}.")
             return 0, []
+
+        print(f"Company: {company_name} ({symbol})")
+        
+        # Filter news for relevance
+        relevant_news = []
+        for article in news:
+            content = article.get('content', {})
+            data_source = content if content else article
+            title = (data_source.get('title') or article.get('title') or "").lower()
+            preview = (data_source.get('summary') or data_source.get('description') or "").lower()
+            
+            # Check if symbol or company name (or parts of it) are mentioned
+            search_terms = {symbol.lower()}
+            if company_name:
+                # Add the first few words of the company name to search terms (e.g., "Apple" from "Apple Inc.")
+                name_words = company_name.split()
+                if name_words:
+                    search_terms.add(name_words[0].lower())
+                search_terms.add(company_name.lower())
+            
+            is_relevant = any(term in title or term in preview for term in search_terms)
+            
+            if is_relevant:
+                relevant_news.append(article)
+        
+        print(f"Filtered {len(news)} total articles down to {len(relevant_news)} relevant articles.")
+        
+        if not relevant_news:
+            # If no relevant news found, maybe the filter was too strict, 
+            # but user specifically asked for relevance so we'll stick to it.
+            return 0, []
+
+        news = relevant_news
 
         # Try to get models
         nlp = get_finbert_pipeline()

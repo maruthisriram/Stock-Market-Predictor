@@ -13,6 +13,14 @@ st.set_page_config(page_title="Stock Sentiment Predictor Pro", layout="wide")
 if 'current_symbol' not in st.session_state:
     st.session_state.current_symbol = "AAPL"
 
+# Handle search reset flag at the top
+if st.session_state.get('reset_search', False):
+    if 'search_input' in st.session_state:
+        st.session_state.search_input = ""
+    # Note: selectboxes with key can be tricky to reset to None, 
+    # but setting search_input to empty will trigger our "if search_query" check to fail.
+    st.session_state.reset_search = False
+
 # Safe CSS (avoiding blocking styles)
 st.markdown("""
 <style>
@@ -102,9 +110,7 @@ st.sidebar.header("Analysis Parameters")
 # Sidebar Helper to change symbol and clear search
 def set_symbol(new_sym):
     st.session_state.current_symbol = new_sym
-    # Reset search inputs if keys are used
-    if 'search_input' in st.session_state:
-        st.session_state.search_input = ""
+    st.session_state.reset_search = True
     st.rerun()
 
 # Search with Suggestions

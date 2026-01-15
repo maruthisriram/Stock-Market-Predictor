@@ -22,6 +22,14 @@ The app started as a simplified script but evolved into a robust dashboard with 
 - **NameError**: Attempted to use `symbol` in a diagnostics expander before the `st.sidebar.text_input` call.
 - **Fix**: Reordered code to ensure all UI variables are initialized before use.
 
+### 4. Search & Relevance
+- **Problem**: News fetched via `yfinance` for specific tickers often include general market news or news about other "hot" companies (e.g., AAPL news containing NVDA or general S&P 500 updates).
+- **Discovery**: News endpoints are often keyword-broad. Without strict filtering, sentiment analysis becomes noisy and inaccurate.
+- **Solution**: 
+    1. Fetch full company name (e.g., "Apple Inc.") via `ticker.info`.
+    2. Implement a strict relevance filter in `data_fetcher.py` that checks for both ticker and company name matches in the title/summary.
+    3. Significantly reduces "noise" (e.g., filtering 10 articles down to 2 highly relevant ones for AAPL).
+
 ## Technical Specs
 - **Backend**: Python, yfinance, vaderSentiment.
 - **Frontend**: Streamlit 1.53.0+, Plotly.

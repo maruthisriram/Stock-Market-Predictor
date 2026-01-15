@@ -17,6 +17,26 @@ def fetch_historical_data(symbol, period="1mo", interval="1d"):
         print(f"Error fetching historical data for {symbol}: {e}")
         return None
 
+def search_stocks(query):
+    """
+    Search for stocks using a string query (name or ticker).
+    Returns a list of dicts with 'symbol' and 'name'.
+    """
+    try:
+        if not query or len(query) < 2:
+            return []
+        search = yf.Search(query)
+        results = []
+        for quote in getattr(search, 'quotes', []):
+            symbol = quote.get('symbol')
+            name = quote.get('shortname') or quote.get('longname') or symbol
+            if symbol:
+                results.append({'symbol': symbol, 'name': name})
+        return results[:10]  # Limit to 10 results
+    except Exception as e:
+        print(f"Error searching for {query}: {e}")
+        return []
+
 def fetch_news_sentiment(symbol):
     """
     Fetch recent news using yfinance and calculate average sentiment score.
@@ -79,10 +99,10 @@ def get_market_movers():
     Fetch top gainers and losers. 
     Using a sample of major tickers to find moves.
     """
-    # Major S&P 100 or popular tickers for demo
-    tickers = ["AAPL", "MSFT", "GOOGL", "AMZN", "TSLA", "META", "NVDA", "BRK-B", "UNH", "JNJ", 
-               "V", "XOM", "WMT", "JPM", "PG", "MA", "LLY", "AVGO", "HD", "CVX", 
-               "PEP", "COST", "MRK", "KO", "ORCL", "BAC", "ADBE", "TMO", "CSCO", "CRM"]
+    # Mix of US (S&P 100) and Indian (Nifty 50) popular tickers
+    tickers = ["AAPL", "MSFT", "GOOGL", "AMZN", "TSLA", "NVDA", "META", 
+               "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "ICICIBANK.NS", "INFY.NS",
+               "BRK-B", "UNH", "JNJ", "V", "XOM", "WMT", "JPM", "PG", "MA", "LLY"]
     
     try:
         print("Fetching market movers...")
@@ -109,6 +129,39 @@ def get_market_movers():
     except Exception as e:
         print(f"Error fetching market movers: {e}")
         return [], []
+
+def get_sector_performance():
+    """
+    Estimate sector performance using major ETFs or large-cap averages.
+    """
+    sectors = {
+        "Technology": "XLK",
+        "Financials": "XLF",
+        "Healthcare": "XLV",
+        "Energy": "XLE",
+        "Consumer Disc": "XLY",
+        "Consumer Staples": "XLP",
+        "Utilities": "XLU",
+        "Real Estate": "XLRE",
+        "Materials": "XLB",
+        "Communication": "XLC"
+    }
+    
+    try:
+        data = yf.download(list(sectors.values()), period="2d", progress=False)['Close']
+        performance = []
+        for name, ticker in sectors.items():
+            if ticker in data and len(data[ticker]) >= 2:
+                current = data[ticker].iloc[-1]
+                prev = data[ticker].iloc[-2]
+                change = ((current - prev) / prev) * 100
+                performance.append({'sector': name, 'change': change})
+        
+        performance.sort(key=lambda x: x['change'], reverse=True)
+        return performance
+    except Exception as e:
+        print(f"Error fetching sector performance: {e}")
+        return []
 
 if __name__ == "__main__":
     # Quick test

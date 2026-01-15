@@ -1,13 +1,17 @@
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
-from data_fetcher import fetch_historical_data, fetch_news_sentiment, get_market_movers
+from data_fetcher import fetch_historical_data, fetch_news_sentiment, get_market_movers, search_stocks, get_sector_performance
 from predictor import predict_movement
 import yfinance as yf
 import time
 
 # Page Config
 st.set_page_config(page_title="Stock Sentiment Predictor Pro", layout="wide")
+
+# Initialize session state for symbol if not present
+if 'current_symbol' not in st.session_state:
+    st.session_state.current_symbol = "AAPL"
 
 # Safe CSS (avoiding blocking styles)
 st.markdown("""
@@ -48,6 +52,13 @@ st.markdown("""
         margin-bottom: 0.5rem;
         border: 1px solid #333;
     }
+    .sector-card {
+        padding: 10px;
+        border-radius: 5px;
+        background: #1e2130;
+        margin-bottom: 5px;
+        border-left: 5px solid #333;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -62,6 +73,13 @@ def get_cached_movers():
     except:
         return [], []
 
+@st.cache_data(ttl=600)
+def get_cached_sectors():
+    try:
+        return get_sector_performance()
+    except:
+        return []
+
 @st.cache_data(ttl=300)
 def get_cached_ticker_data(symbol, period):
     df = fetch_historical_data(symbol, period=period)
@@ -70,23 +88,40 @@ def get_cached_ticker_data(symbol, period):
 
 # Sidebar
 st.sidebar.header("Analysis Parameters")
-symbol = st.sidebar.text_input("Ticker Symbol", value="AAPL").upper().strip()
+
+# Search with Suggestions
+search_query = st.sidebar.text_input("Search Company or Ticker", placeholder="e.g. Reliance, Apple...")
+if search_query:
+    suggestions = search_stocks(search_query)
+    if suggestions:
+        options = [f"{s['name']} ({s['symbol']})" for s in suggestions]
+        selected_option = st.sidebar.selectbox("Select a company", options, index=0)
+        # Extract symbol from "Name (SYMBOL)"
+        new_symbol = selected_option.split('(')[-1].strip(')')
+        if new_symbol != st.session_state.current_symbol:
+            st.session_state.current_symbol = new_symbol
+            st.rerun()
+
+symbol = st.sidebar.text_input("Active Ticker", value=st.session_state.current_symbol).upper().strip()
+if symbol != st.session_state.current_symbol:
+    st.session_state.current_symbol = symbol
+
 period = st.sidebar.selectbox("History Period", ["1mo", "3mo", "6mo", "1y", "2y"])
 
 # Layout: Two columns (Main Analysis vs Market Overview)
 col_main, col_market = st.columns([0.7, 0.3])
 
 with col_main:
-    if symbol:
+    if st.session_state.current_symbol:
         try:
-            with st.status(f"Fetching intelligence for {symbol}...", expanded=True) as status:
+            with st.status(f"Fetching intelligence for {st.session_state.current_symbol}...", expanded=True) as status:
                 st.write("Retreiving technical data...")
-                df, avg_sentiment, news_articles = get_cached_ticker_data(symbol, period)
+                df, avg_sentiment, news_articles = get_cached_ticker_data(st.session_state.current_symbol, period)
                 
                 if df is not None and not df.empty:
                     st.write("Calculating market sentiment...")
                     prediction, reason = predict_movement(df, avg_sentiment)
-                    status.update(label=f"Analysis Complete for {symbol}", state="complete", expanded=False)
+                    status.update(label=f"Analysis Complete for {st.session_state.current_symbol}", state="complete", expanded=False)
                     
                     # Metrics Grid
                     m1, m2, m3 = st.columns(3)
@@ -106,7 +141,7 @@ with col_main:
                     """, unsafe_allow_html=True)
 
                     # Content Tabs
-                    tab_c, tab_n = st.tabs(["📊 Technical Chart", "📰 Logic Source News"])
+                    tab_c, tab_n, tab_s = st.tabs(["📊 Technical Chart", "📰 Logic Source News", "🌐 Sector Analysis"])
                     
                     with tab_c:
                         fig = go.Figure()
@@ -129,12 +164,29 @@ with col_main:
                                 """, unsafe_allow_html=True)
                         else:
                             st.warning("No recent news headers found. The prediction is based on technical trends.")
+
+                    with tab_s:
+                        st.subheader("Sector Performance (US Benchmarks)")
+                        sectors = get_cached_sectors()
+                        if sectors:
+                            cols = st.columns(2)
+                            for i, sec in enumerate(sectors):
+                                with cols[i % 2]:
+                                    color = "#4caf50" if sec['change'] > 0 else "#f44336"
+                                    st.markdown(f"""
+                                    <div class="sector-card" style="border-left-color: {color};">
+                                        <div style="display: flex; justify-content: space-between;">
+                                            <span>{sec['sector']}</span>
+                                            <span style="color: {color}; font-weight: bold;">{sec['change']:.2f}%</span>
+                                        </div>
+                                    </div>
+                                    """, unsafe_allow_html=True)
                 else:
-                    st.error(f"Could not load data for '{symbol}'. Please verify the ticker symbol.")
+                    st.error(f"Could not load data for '{st.session_state.current_symbol}'. Please verify the ticker symbol.")
         except Exception as e:
             st.error(f"Analysis failed: {e}")
     else:
-        st.info("Enter a ticker in the sidebar to begin.")
+        st.info("Search or enter a ticker in the sidebar to begin.")
 
 with col_market:
     st.subheader("🔥 Top Movers")
@@ -144,28 +196,28 @@ with col_market:
         if gainers:
             st.write("🚀 **Top Gainers**")
             for g in gainers[:5]:
-                st.write(f"{g['symbol']} | ${g['price']:.2f} | :green[+{g['change']:.1f}%]")
+                if st.button(f"{g['symbol']} (+{g['change']:.1f}%)", key=f"btn_gain_{g['symbol']}"):
+                    st.session_state.current_symbol = g['symbol']
+                    st.rerun()
         
         st.write("---")
         
         if losers:
             st.write("📉 **Top Losers**")
             for l in losers[:5]:
-                st.write(f"{l['symbol']} | ${l['price']:.2f} | :red[{l['change']:.1f}%]")
+                if st.button(f"{l['symbol']} ({l['change']:.1f}%)", key=f"btn_lose_{l['symbol']}"):
+                    st.session_state.current_symbol = l['symbol']
+                    st.rerun()
 
 # Sidebar footer
 st.sidebar.markdown("---")
 with st.sidebar.expander("🛠️ Diagnostics"):
     st.write(f"V: {yf.__version__}")
-    if symbol:
-        st.write(f"Target: {symbol}")
+    if st.session_state.current_symbol:
+        st.write(f"Target: {st.session_state.current_symbol}")
         try:
-            t = yf.Ticker(symbol)
+            t = yf.Ticker(st.session_state.current_symbol)
             raw = getattr(t, 'news', [])
             st.write(f"Raw Items: {len(raw)}")
-            if raw:
-                st.write("Sample Keys:", list(raw[0].keys()))
-                if 'content' in raw[0]:
-                    st.write("Content Keys:", list(raw[0]['content'].keys()))
         except Exception as ex:
             st.write(f"Error: {ex}")

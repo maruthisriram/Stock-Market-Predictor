@@ -106,21 +106,29 @@ def get_market_movers():
     
     try:
         print("Fetching market movers...")
-        # Download 2 days of data to calculate change
-        data = yf.download(tickers, period="2d", group_by='ticker', progress=False)
+        # Download a bit more data to ensure we have at least 2 valid points
+        data = yf.download(tickers, period="5d", group_by='ticker', progress=False)
         
         movers = []
         for ticker in tickers:
             try:
-                if ticker in data and len(data[ticker]) >= 2:
-                    current = data[ticker]['Close'].iloc[-1]
-                    prev = data[ticker]['Close'].iloc[-2]
-                    change = ((current - prev) / prev) * 100
-                    movers.append({'symbol': ticker, 'price': current, 'change': change})
-            except:
+                if ticker in data:
+                    # Drop NaNs and get the last two valid close prices
+                    prices = data[ticker]['Close'].dropna()
+                    if len(prices) >= 2:
+                        current = prices.iloc[-1]
+                        prev = prices.iloc[-2]
+                        change = ((current - prev) / prev) * 100
+                        
+                        # Only add if change is not nan or inf
+                        import numpy as np
+                        if not np.isnan(change) and not np.isinf(change):
+                            movers.append({'symbol': ticker, 'price': current, 'change': change})
+            except Exception as e:
+                print(f"Error processing {ticker}: {e}")
                 continue
         
-        # Sort by change
+        # Sort and return
         movers.sort(key=lambda x: x['change'], reverse=True)
         top_gainers = movers[:10]
         top_losers = sorted(movers, key=lambda x: x['change'])[:10]

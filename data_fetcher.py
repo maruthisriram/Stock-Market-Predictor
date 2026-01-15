@@ -7,7 +7,9 @@ import numpy as np
 import os
 import requests
 import xml.etree.ElementTree as ET
+import xml.etree.ElementTree as ET
 from html import unescape
+from io import StringIO
 
 try:
     from transformers import pipeline
@@ -28,32 +30,33 @@ except ImportError:
 
 class BaseFetcher(ABC):
     """Abstract base class for all data fetchers"""
+    _shared_finbert = None
+    _shared_summarizer = None
+    
     def __init__(self):
         self._vader_analyzer = SentimentIntensityAnalyzer()
-        self._finbert_pipe = None
-        self._summarizer_pipe = None
 
     def get_finbert_pipeline(self):
         if pipeline is None: return None
-        if self._finbert_pipe is None:
+        if BaseFetcher._shared_finbert is None:
             try:
-                print("Initializing FinBERT model...")
-                self._finbert_pipe = pipeline("sentiment-analysis", model="ProsusAI/finbert")
+                print("Initializing FinBERT model (Shared)...")
+                BaseFetcher._shared_finbert = pipeline("sentiment-analysis", model="ProsusAI/finbert")
             except Exception as e:
                 print(f"Error loading FinBERT: {e}")
                 return None
-        return self._finbert_pipe
+        return BaseFetcher._shared_finbert
 
     def get_summarizer_pipeline(self):
         if pipeline is None: return None
-        if self._summarizer_pipe is None:
+        if BaseFetcher._shared_summarizer is None:
             try:
-                print("Initializing Summarizer model...")
-                self._summarizer_pipe = pipeline("summarization", model="t5-small")
+                print("Initializing Summarizer model (Shared)...")
+                BaseFetcher._shared_summarizer = pipeline("summarization", model="t5-small")
             except Exception as e:
                 print(f"Error loading Summarizer: {e}")
                 return None
-        return self._summarizer_pipe
+        return BaseFetcher._shared_summarizer
 
     def _scrape_article_text(self, url):
         if Article is None: return None
@@ -238,14 +241,74 @@ class StockFetcher(BaseFetcher):
             print(f"Error searching for {query}: {e}")
             return []
 
+    def _fetch_nifty50_tickers(self):
+        """Dynamic scrape of Nifty 50 constituents from Wikipedia"""
+        try:
+            url = "https://en.wikipedia.org/wiki/NIFTY_50"
+            headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"}
+            
+            response = requests.get(url, headers=headers)
+            if response.status_code != 200: return None
+            
+            tables = pd.read_html(StringIO(response.text))
+            
+            # Table 1 usually contains the components (checked via debug script)
+            # Columns: Company Name, Symbol, Sector, etc.
+            if len(tables) > 1:
+                target_table = tables[1]
+                if 'Symbol' in target_table.columns:
+                    tickers = target_table['Symbol'].tolist()
+                    return [t + ".NS" for t in tickers]
+            return None
+        except Exception as e:
+            print(f"Error scraping Wikipedia: {e}")
+            return None
+
     def get_market_movers(self):
-        return [
-            {'symbol': 'RELIANCE.NS', 'change': 1.2},
-            {'symbol': 'HDFCBANK.NS', 'change': 0.8},
-            {'symbol': 'TCS.NS', 'change': -0.5},
-            {'symbol': 'AAPL', 'change': 2.1},
-            {'symbol': 'TSLA', 'change': -1.4}
-        ], []
+        """Dynamic Market Movers from real-time Nifty 50 scan"""
+        try:
+            # 1. Dynamically fetch the list of Nifty 50 stocks
+            tickers = self._fetch_nifty50_tickers()
+            
+            # Fallback only if scraping fails entirely (connectivity/layout change)
+            if not tickers:
+                tickers = [
+                    "RELIANCE.NS", "TCS.NS", "HDFCBANK.NS", "ICICIBANK.NS", "INFY.NS", 
+                    "BHARTIARTL.NS", "HINDUNILVR.NS", "ITC.NS", "LT.NS", "SBIN.NS", 
+                    "BAJFINANCE.NS", "KOTAKBANK.NS", "WIPRO.NS", "HCLTECH.NS", "ASIANPAINT.NS"
+                ]
+
+            # 2. Batch download (5 days for safe change calc)
+            data = yf.download(tickers, period="5d", group_by='ticker', progress=False)
+            movers = []
+            
+            for ticker in tickers:
+                try:
+                    # Handle multi-level column structure from yfinance download
+                    if isinstance(data.columns, pd.MultiIndex):
+                        if ticker in data.columns.get_level_values(0):
+                            ticker_data = data[ticker]
+                        else: continue
+                    else:
+                         # Flattened structure case
+                         if ticker in data.columns: # unlikely with group_by='ticker' but possible if single ticker
+                             pass 
+                         continue
+
+                    if not ticker_data.empty:
+                        prices = ticker_data['Close'].dropna()
+                        if len(prices) >= 2:
+                            current = prices.iloc[-1]
+                            prev = prices.iloc[-2]
+                            change = ((current - prev) / prev) * 100
+                            movers.append({'symbol': ticker, 'price': current, 'change': round(change, 2)})
+                except: continue
+            
+            movers.sort(key=lambda x: x['change'], reverse=True)
+            return movers[:5], sorted(movers, key=lambda x: x['change'])[:5]
+        except Exception as e:
+            print(f"Error fetching movers: {e}")
+            return [], []
 
 class MutualFundFetcher(BaseFetcher):
     _mf_instance = None
@@ -281,33 +344,53 @@ class MutualFundFetcher(BaseFetcher):
         return None
 
     def get_trending_mfs(self):
-        """Fetch real trending funds by calculating recent performance"""
-        codes = {
-            "120716": "HDFC Index Nifty 50",
-            "119842": "SBI Bluechip Fund",
-            "118834": "Nippon India Large Cap",
-            "100355": "ICICI Prudential Bluechip",
-            "VFIAX": "Vanguard 500 Index",
-            "FXAIX": "Fidelity 500 Index"
-        }
-        
-        results = []
-        for code, name in codes.items():
-            try:
-                # Use fetch_historical_data which already handles the logic
-                # We use 1mo period to get enough points for change calculation
-                df = self.fetch_historical_data(code, period="1mo")
-                if df is not None and not df.empty and len(df) >= 2:
-                    # Sort just in case
-                    df = df.sort_index()
-                    latest = df['Close'].iloc[-1]
-                    prev = df['Close'].iloc[-2]
-                    change = ((latest - prev) / prev) * 100
-                    results.append({'name': name, 'symbol': code, 'change': round(change, 2)})
-            except: continue
-        
-        # Sort by best performers for "Trending" feel
-        return sorted(results, key=lambda x: x['change'], reverse=True)[:5]
+        """Fetch true top-performing funds by dynamically scanning API-listed schemes."""
+        try:
+            if not self.mf:
+                return [{'name': 'Mftool Offline', 'symbol': '000000', 'change': 0}]
+            
+            # Step 1: Get ALL available scheme codes from the API
+            # This is a dynamic call, returns dict {code: name}
+            all_schemes = self.mf.get_scheme_codes()
+            
+            if not all_schemes:
+                return []
+                
+            # Step 2: Dynamically filter for liquid/popular categories (Index, Bluechip, Nifty)
+            # This replaces hardcoded IDs with dynamic search
+            candidates = []
+            keywords = ['Nifty 50 Index', 'Bluechip Fund', 'Large Cap']
+            
+            for code, name in all_schemes.items():
+                name_lower = name.lower()
+                # strict filter to avoid 15000 checks, just get 20 good candidates
+                if any(k.lower() in name_lower for k in keywords) and 'Direct' in name and 'Growth' in name:
+                     candidates.append({'code': code, 'name': name})
+                     if len(candidates) >= 15: # Limit candidate pool for performance
+                         break
+            
+            # Step 3: Calculate performance for these dynamically found candidates
+            results = []
+            for item in candidates:
+                try:
+                    code = item['code']
+                    name = item['name']
+                    
+                    df = self.fetch_historical_data(code, period="1mo")
+                    if df is not None and not df.empty and len(df) >= 2:
+                        latest = df['Close'].iloc[-1]
+                        prev = df['Close'].iloc[-2]
+                        change = ((latest - prev) / prev) * 100
+                        
+                        results.append({'name': name, 'symbol': code, 'change': round(change, 2)})
+                except: continue
+                
+            # Step 4: Return top performing ones
+            return sorted(results, key=lambda x: x['change'], reverse=True)[:5]
+            
+        except Exception as e:
+            print(f"Error fetching trending MFs: {e}")
+            return []
 
     def search(self, query):
         if not self.mf: return []

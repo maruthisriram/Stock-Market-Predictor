@@ -1,52 +1,61 @@
 import pandas as pd
 
-def predict_movement(historical_df, sentiment_score):
-    """
-    A simple prediction logic combining price trends and news sentiment.
-    Returns: "UP", "DOWN", or "NEUTRAL" and a confidence/reasoning message.
-    """
-    if historical_df is None or historical_df.empty:
-        return "NEUTRAL", "No historical data available."
+class StockPredictor:
+    def predict(self, historical_df, sentiment_score):
+        if historical_df is None or historical_df.empty:
+            return "NEUTRAL", "Insufficient data for a reliable forecast."
 
-    # Calculate 5-day and 20-day Simple Moving Averages (or whatever is available)
-    historical_df['SMA_5'] = historical_df['Close'].rolling(window=min(5, len(historical_df))).mean()
-    
-    # Simple trend logic: is the latest price above the 5-day SMA?
-    latest_close = historical_df['Close'].iloc[-1]
-    latest_sma5 = historical_df['SMA_5'].iloc[-1]
-    
-    price_trend = "UP" if latest_close >= latest_sma5 else "DOWN"
-    
-    # Sentiment levels
-    if sentiment_score > 0.1:
-        sentiment_trend = "UP"
-    elif sentiment_score < -0.1:
-        sentiment_trend = "DOWN"
-    else:
-        sentiment_trend = "NEUTRAL"
+        df = historical_df.copy()
+        # Explicit type conversion to avoid 'str' errors
+        df['Close'] = pd.to_numeric(df['Close'], errors='coerce')
+        df = df.dropna(subset=['Close'])
         
-    # Combine logic
-    if price_trend == "UP" and sentiment_trend == "UP":
-        prediction = "UP"
-        reason = "Bullish trend and positive news sentiment."
-    elif price_trend == "DOWN" and sentiment_trend == "DOWN":
-        prediction = "DOWN"
-        reason = "Bearish trend and negative news sentiment."
-    elif sentiment_trend == "UP":
-        prediction = "UP"
-        reason = "Positive news sentiment outweighing technical trend."
-    elif sentiment_trend == "DOWN":
-        prediction = "DOWN"
-        reason = "Negative news sentiment outweighing technical trend."
-    else:
-        prediction = price_trend
-        reason = f"Following technical trend ({price_trend}) as sentiment is neutral."
+        if df.empty:
+            return "NEUTRAL", "Data processing resulted in an empty set."
 
-    return prediction, reason
+        # SMA 5
+        df['SMA_5'] = df['Close'].rolling(window=min(5, len(df))).mean()
+        
+        # Simple RSI calculation
+        delta = df['Close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=min(14, len(df))).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=min(14, len(df))).mean()
+        rs = gain / loss
+        df['RSI'] = 100 - (100 / (1 + rs))
+        
+        latest_close = df['Close'].iloc[-1]
+        latest_sma5 = df['SMA_5'].iloc[-1]
+        latest_rsi = df['RSI'].iloc[-1] if not pd.isna(df['RSI'].iloc[-1]) else 50
+        
+        # Technical Signal
+        if latest_close >= latest_sma5 and latest_rsi < 70:
+            tech_signal = "BULLISH"
+        elif latest_close < latest_sma5 or latest_rsi > 70:
+            tech_signal = "BEARISH"
+        else:
+            tech_signal = "NEUTRAL"
+            
+        # Sentiment Signal
+        sent_signal = "BULLISH" if sentiment_score > 0.1 else ("BEARISH" if sentiment_score < -0.1 else "NEUTRAL")
+            
+        # Decision Matrix
+        if tech_signal == "BULLISH" and sent_signal == "BULLISH":
+            return "UP", "Strong convergence of positive technical momentum and news sentiment."
+        elif tech_signal == "BEARISH" and sent_signal == "BEARISH":
+            return "DOWN", "Bearish technical indicators aligned with negative market sentiment."
+        elif tech_signal == "BULLISH":
+            return "UP", f"Technical indicators show strength ({tech_signal}) despite mixed sentiment."
+        elif sent_signal == "BULLISH":
+            return "UP", "Strong positive sentiment is currently driving the market outlook."
+        elif tech_signal == "BEARISH":
+            return "DOWN", "Technical indicators signal caution as momentum slows."
+        else:
+            return "NEUTRAL", "Market is currently showing sideways movement with balanced sentiment."
 
 if __name__ == "__main__":
     # Mock test
+    predictor = StockPredictor()
     mock_df = pd.DataFrame({'Close': [100, 102, 101, 103, 105]})
     sent = 0.5
-    pred, reason = predict_movement(mock_df, sent)
+    pred, reason = predictor.predict(mock_df, sent)
     print(f"Prediction: {pred}, Reason: {reason}")

@@ -1,253 +1,300 @@
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
-from data_fetcher import fetch_historical_data, fetch_news_sentiment, get_market_movers, search_stocks, get_sector_performance
-from predictor import predict_movement
+import plotly.express as px
+from data_fetcher import StockFetcher, MutualFundFetcher
+from predictor import StockPredictor
 import yfinance as yf
-import time
+from datetime import datetime
 
 # Page Config
-st.set_page_config(page_title="Stock Sentiment Predictor Pro", layout="wide")
+st.set_page_config(page_title="FinSight Pro: Wealth Intelligence", layout="wide", page_icon="📈")
 
-# Initialize session state for symbol if not present
-if 'current_symbol' not in st.session_state:
-    st.session_state.current_symbol = "AAPL"
+# Persistent State Initialization
+if 'current_symbol' not in st.session_state: st.session_state.current_symbol = "AAPL"
+if 'current_mf_code' not in st.session_state: st.session_state.current_mf_code = "120716"
+if 'stock_search_val' not in st.session_state: st.session_state.stock_search_val = ""
+if 'mf_search_val' not in st.session_state: st.session_state.mf_search_val = ""
 
-# Handle search reset flag at the top
-if st.session_state.get('reset_search', False):
-    if 'search_input' in st.session_state:
-        st.session_state.search_input = ""
-    # Note: selectboxes with key can be tricky to reset to None, 
-    # but setting search_input to empty will trigger our "if search_query" check to fail.
-    st.session_state.reset_search = False
-
-# Safe CSS (avoiding blocking styles)
-st.markdown("""
-<style>
-    .stApp {
-        background-color: #0e1117;
-    }
-    .metric-card {
-        background-color: #1e2130;
-        padding: 15px;
-        border-radius: 10px;
-        border: 1px solid #3e4461;
-        margin-bottom: 10px;
-    }
-    .prediction-card {
-        padding: 2.5rem;
-        border-radius: 1rem;
-        text-align: center;
-        margin: 1rem 0;
-        color: white;
-    }
-    .up-card {
-        background: linear-gradient(135deg, #1d4d2f 0%, #2e7d32 100%);
-        border: 2px solid #4caf50;
-    }
-    .down-card {
-        background: linear-gradient(135deg, #4d1d1d 0%, #c62828 100%);
-        border: 2px solid #f44336;
-    }
-    .neutral-card {
-        background: linear-gradient(135deg, #222 0%, #444 100%);
-        border: 2px solid #666;
-    }
-    .news-item {
-        padding: 1rem;
-        border-radius: 0.5rem;
-        background: #1e2130;
-        margin-bottom: 0.5rem;
-        border: 1px solid #333;
-    }
-    .sector-card {
-        padding: 10px;
-        border-radius: 5px;
-        background: #1e2130;
-        margin-bottom: 5px;
-        border-left: 5px solid #333;
-    }
-</style>
-""", unsafe_allow_html=True)
-
-# App Title
-st.title("📈 Stock Intelligence Dashboard")
-
-# Caching
-@st.cache_resource
-def load_models():
-    """Cache the AI models across sessions and reruns."""
-    from data_fetcher import get_finbert_pipeline, get_summarizer_pipeline
-    get_finbert_pipeline()
-    get_summarizer_pipeline()
-    return True
-
-@st.cache_data(ttl=600)
-def get_cached_movers():
+def format_number(val):
+    """Formats large numbers into human-readable strings (e.g., 1.2B, 1.2M, 45K)"""
     try:
-        return get_market_movers()
-    except:
-        return [], []
+        if val is None or pd.isna(val) or val == 0: return "N/A"
+        val = float(val)
+        if val >= 1_000_000_000: return f"{val / 1_000_000_000:.2f}B"
+        elif val >= 1_000_000: return f"{val / 1_000_000:.2f}M"
+        elif val >= 1_000: return f"{val / 1_000:.1f}K"
+        return f"{val:,.0f}"
+    except: return "N/A"
 
-@st.cache_data(ttl=600)
-def get_cached_sectors():
-    try:
-        return get_sector_performance()
-    except:
-        return []
+class DashboardApp:
+    def __init__(self):
+        self.stock_fetcher = StockFetcher()
+        self.mf_fetcher = MutualFundFetcher()
+        self.predictor = StockPredictor()
 
-@st.cache_data(ttl=300)
-def get_cached_ticker_data(symbol, period):
-    # Pre-warm models cache
-    load_models()
-    df = fetch_historical_data(symbol, period=period)
-    avg_sent, news = fetch_news_sentiment(symbol)
-    return df, avg_sent, news
+    def apply_styles(self):
+        st.markdown("""
+        <style>
+            @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600&display=swap');
+            html, body, [class*="st-"] { font-family: 'Outfit', sans-serif; }
+            .stApp { background: linear-gradient(180deg, #0e1117 0%, #161b22 100%); }
+            .main-header { font-size: 3rem; font-weight: 600; background: linear-gradient(90deg, #00d1ff, #00ff88); 
+                          -webkit-background-clip: text; -webkit-text-fill-color: transparent; margin-bottom: 0.2rem; }
+            .metric-card { background: rgba(30,33,48,0.4); backdrop-filter: blur(15px); padding: 20px; 
+                          border-radius: 15px; border: 1px solid rgba(255,255,255,0.05); transition: 0.3s; }
+            .metric-card:hover { border-color: #00d1ff; transform: translateY(-2px); }
+            .prediction-banner { padding: 1.5rem; border-radius: 1.2rem; text-align: center; margin: 1rem 0; }
+            .up-gradient { background: linear-gradient(135deg, rgba(29,77,47,0.7), rgba(46,125,50,0.7)); border: 1px solid #4caf50; }
+            .down-gradient { background: linear-gradient(135deg, rgba(77,29,29,0.7), rgba(198,40,40,0.7)); border: 1px solid #f44336; }
+            .neutral-gradient { background: rgba(30,33,48,0.8); border: 1px solid #555; }
+            .news-card { padding: 1.2rem; border-radius: 1rem; background: rgba(255,255,255,0.02); 
+                        margin-bottom: 0.8rem; border: 1px solid rgba(0,209,255,0.1); }
+        </style>
+        """, unsafe_allow_html=True)
 
-# Sidebar
-st.sidebar.header("Analysis Parameters")
+    def render_metrics(self, df, label="Price", unit="$", extra_metric=None, extra_label="Market Volume"):
+        latest = df['Close'].iloc[-1]
+        prev = df['Close'].iloc[-2] if len(df) > 1 else latest
+        change = latest - prev
+        pct = (change / prev) * 100 if prev != 0 else 0
+        extra_val = extra_metric if extra_metric else format_number(df['Volume'].iloc[-1] if 'Volume' in df.columns else 0)
+        
+        m1, m2, m3 = st.columns(3)
+        with m1: st.markdown(f'<div class="metric-card"><p style="color:#888;margin:0;">Current {label}</p><h2 style="margin:0;">{unit}{latest:,.2f}</h2></div>', unsafe_allow_html=True)
+        with m2: 
+            color = "#4caf50" if change >= 0 else "#f44336"
+            st.markdown(f'<div class="metric-card"><p style="color:#888;margin:0;">Day Change</p><h2 style="margin:0;color:{color};">{unit}{change:+,.2f} ({pct:+,.2f}%)</h2></div>', unsafe_allow_html=True)
+        with m3: st.markdown(f'<div class="metric-card"><p style="color:#888;margin:0;">{extra_label}</p><h2 style="margin:0;">{extra_val}</h2></div>', unsafe_allow_html=True)
 
-# Sidebar Helper to change symbol and clear search
-def set_symbol(new_sym):
-    st.session_state.current_symbol = new_sym
-    st.session_state.reset_search = True
-    st.rerun()
+    def render_diversification(self, code, fund_name):
+        """Renders diversification pie chart for US or category fallback for India"""
+        st.markdown("### 🧩 Portfolio Insights")
+        weights = None
+        
+        # Scenario 1: US Fund (yfinance)
+        if len(code) == 5 and code.endswith('X'):
+            ticker = yf.Ticker(code)
+            if hasattr(ticker, 'funds_data'):
+                weights = ticker.funds_data.sector_weightings
+        
+        # Scenario 2: Indian Fund (Category Fallback)
+        if not weights:
+            # Benchmark weights for major categories
+            if "Index" in fund_name or "Blue" in fund_name:
+                weights = {'Financials': 0.35, 'IT': 0.15, 'Energy': 0.12, 'Consumer': 0.10, 'Health': 0.08, 'Others': 0.20}
+            elif "Small" in fund_name or "Mid" in fund_name:
+                weights = {'Industrials': 0.25, 'Cons. Cyclical': 0.20, 'Health': 0.15, 'Tech': 0.10, 'Services': 0.10, 'Others': 0.20}
+            elif "Debt" in fund_name:
+                weights = {'Govt Bonds': 0.45, 'Corp Debt': 0.35, 'Cash': 0.15, 'TBills': 0.05}
+            else:
+                weights = {'Equity': 0.65, 'Debt': 0.25, 'Cash': 0.10}
 
-# Search with Suggestions
-search_query = st.sidebar.text_input("Search Company or Ticker", placeholder="e.g. Reliance, Apple...", key="search_input")
-if search_query:
-    suggestions = search_stocks(search_query)
-    if suggestions:
-        options = [f"{s['name']} ({s['symbol']})" for s in suggestions]
-        selected_option = st.sidebar.selectbox("Select a company", options, index=None, placeholder="Choose a result...", key="search_select")
-        if selected_option:
-            # Extract symbol from "Name (SYMBOL)"
-            new_symbol = selected_option.split('(')[-1].strip(')')
-            if new_symbol != st.session_state.current_symbol:
-                set_symbol(new_symbol)
-    
-    if st.sidebar.button("Clear Search"):
-        st.session_state.search_input = ""
-        st.rerun()
+        if weights:
+            labels = [k.replace('_', ' ').capitalize() for k in weights.keys()]
+            values = list(weights.values())
+            fig = px.pie(names=labels, values=values, hole=0.4, 
+                         color_discrete_sequence=px.colors.sequential.Tealgrn)
+            fig.update_layout(template="plotly_dark", height=320, margin=dict(t=0, b=0, l=0, r=0),
+                              paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
+            st.plotly_chart(fig, width='stretch')
+        else:
+            st.info("Diversification data unavailable for this specific scheme.")
 
-symbol_input = st.sidebar.text_input("Active Ticker", value=st.session_state.current_symbol).upper().strip()
-if symbol_input != st.session_state.current_symbol:
-    st.session_state.current_symbol = symbol_input
+    def render_prediction(self, pred, reason):
+        css = "up-gradient" if pred == "UP" else ("down-gradient" if pred == "DOWN" else "neutral-gradient")
+        icon = "🚀" if pred == "UP" else ("📉" if pred == "DOWN" else "⚖️")
+        st.markdown(f'<div class="prediction-banner {css}"><h2 style="margin:0;">{icon} {pred} FORECAST</h2><p style="margin:5px 0;opacity:0.9;">{reason}</p></div>', unsafe_allow_html=True)
 
-period = st.sidebar.selectbox("History Period", ["1mo", "3mo", "6mo", "1y", "2y"])
-
-# Layout: Two columns (Main Analysis vs Market Overview)
-col_main, col_market = st.columns([0.7, 0.3])
-
-with col_main:
-    if st.session_state.current_symbol:
-        try:
-            with st.status(f"Fetching intelligence for {st.session_state.current_symbol}...", expanded=True) as status:
-                st.write("Retreiving technical data...")
-                df, avg_sentiment, news_articles = get_cached_ticker_data(st.session_state.current_symbol, period)
-                
-                if df is not None and not df.empty:
-                    st.write("Calculating market sentiment...")
-                    prediction, reason = predict_movement(df, avg_sentiment)
-                    status.update(label=f"Analysis Complete for {st.session_state.current_symbol}", state="complete", expanded=False)
-                    
-                    # Metrics Grid
-                    m1, m2, m3 = st.columns(3)
-                    m1.metric("Current Price", f"${df['Close'].iloc[-1]:.2f}")
-                    m2.metric("News Sentiment", f"{avg_sentiment:.2f}")
-                    if len(df) > 1:
-                        change = df['Close'].iloc[-1] - df['Close'].iloc[-2]
-                        m3.metric("Daily Shift", f"${change:.2f}", delta=f"{change:.2f}")
-
-                    # Prediction Visual
-                    card_class = "up-card" if prediction == "UP" else ("down-card" if prediction == "DOWN" else "neutral-card")
-                    st.markdown(f"""
-                    <div class="prediction-card {card_class}">
-                        <h1 style="margin:0; font-size: 3rem;">{prediction}</h1>
-                        <p style="font-size: 1.2rem; opacity: 0.9;">{reason}</p>
+    def render_news_feed(self, news):
+        if not news:
+            st.info("No active news headers for this asset.")
+            return
+        for art in news:
+            color = "#4caf50" if art['sentiment'] > 0 else ("#f44336" if art['sentiment'] < 0 else "#888")
+            sign = "+" if art['sentiment'] > 0 else ""
+            st.markdown(f"""
+            <div class="news-card">
+                <div style="display:flex; justify-content:space-between; align-items:start;">
+                    <h4 style="margin:0; color:#00d1ff; flex:1; padding-right:10px;">{art['title']}</h4>
+                    <div style="text-align:right; min-width:80px;">
+                        <span style="color:{color}; font-weight:700; font-size:1.1rem;">{sign}{art['sentiment']:.2f}</span><br>
+                        <small style="color:{color}; font-size:0.7rem; text-transform:uppercase;">{art['reasoning']}</small>
                     </div>
-                    """, unsafe_allow_html=True)
+                </div>
+                <p style="font-size:0.9rem; color:#bbb; margin:12px 0; line-height:1.4;">{art['summary']}</p>
+                <div style="font-size:0.75rem; color:#666; display:flex; justify-content:space-between;">
+                    <span>Source: {art['publisher']}</span>
+                    <a href="{art['link']}" target="_blank" style="color:#00d1ff; text-decoration:none;">Full Story ↗</a>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
 
-                    # Content Tabs
-                    tab_c, tab_n, tab_s = st.tabs(["📊 Technical Chart", "🌐 Meaning-aware Logic", "📈 Sector Analysis"])
-                    
-                    with tab_c:
-                        fig = go.Figure()
-                        fig.add_trace(go.Scatter(x=df.index, y=df['Close'], name="Price", line=dict(color='#00d1ff', width=3)))
-                        fig.update_layout(template="plotly_dark", height=400, margin=dict(t=0, b=0), paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
-                        st.plotly_chart(fig, use_container_width=True)
-
-                    with tab_n:
-                        if news_articles:
-                            for art in news_articles[:10]:
-                                color = "#4caf50" if art['sentiment'] > 0 else ("#f44336" if art['sentiment'] < 0 else "#aaa")
-                                st.markdown(f"""
-                                <div class="news-item">
-                                    <h4 style="margin:0;"><a href="{art['link']}" target="_blank" style="color:#00d1ff; text-decoration:none;">{art['title']}</a></h4>
-                                    <p style="font-size: 0.9rem; color: #ccc; margin: 10px 0;"><b>Summary:</b> {art['summary']}</p>
-                                    <div style="margin-top:5px; color:#888;">
-                                        <span>{art['publisher']}</span> | 
-                                        <span>Confidence: <b style="color:{color};">{abs(art['sentiment']):.2f}</b></span>
-                                    </div>
-                                    <div style="margin-top:10px; padding: 5px 10px; background: rgba(0,209,255,0.1); border-radius: 5px; border-left: 3px solid #00d1ff;">
-                                        <span style="font-size: 0.85rem; color: #00d1ff;">🎯 <b>Market Outlook:</b> {art['reasoning']}</span>
-                                    </div>
-                                </div>
-                                """, unsafe_allow_html=True)
-                        else:
-                            st.warning("No recent news headers found. The prediction is based on technical trends.")
-
-                    with tab_s:
-                        st.subheader("Sector Performance (US Benchmarks)")
-                        sectors = get_cached_sectors()
-                        if sectors:
-                            cols = st.columns(2)
-                            for i, sec in enumerate(sectors):
-                                with cols[i % 2]:
-                                    color = "#4caf50" if sec['change'] > 0 else "#f44336"
-                                    st.markdown(f"""
-                                    <div class="sector-card" style="border-left-color: {color};">
-                                        <div style="display: flex; justify-content: space-between;">
-                                            <span>{sec['sector']}</span>
-                                            <span style="color: {color}; font-weight: bold;">{sec['change']:.2f}%</span>
-                                        </div>
-                                    </div>
-                                    """, unsafe_allow_html=True)
-                else:
-                    st.error(f"Could not load data for '{st.session_state.current_symbol}'. Please verify the ticker symbol.")
-        except Exception as e:
-            st.error(f"Analysis failed: {e}")
-    else:
-        st.info("Search or enter a ticker in the sidebar to begin.")
-
-with col_market:
-    st.subheader("🔥 Top Movers")
-    with st.spinner("Updating market..."):
-        gainers, losers = get_cached_movers()
+    def render_stock_module(self, period):
+        # Google-style Autocomplete for Stocks
+        st.markdown("### 🔍 Stock Discovery")
         
-        if gainers:
-            st.write("🚀 **Top Gainers**")
-            for g in gainers[:5]:
-                if st.button(f"{g['symbol']} (+{g['change']:.1f}%)", key=f"btn_gain_{g['symbol']}", use_container_width=True):
-                    set_symbol(g['symbol'])
+        # Pre-populate with popular stocks to make it feel like Google suggestions
+        popular_stocks = ["AAPL", "MSFT", "GOOGL", "AMZN", "TSLA", "META", "NVDA", 
+                          "RELIANCE.NS", "HDFCBANK.NS", "TCS.NS", "INFY.NS", "ICICIBANK.NS"]
         
-        st.write("---")
+        if st.session_state.current_symbol not in popular_stocks:
+            popular_stocks.insert(0, st.session_state.current_symbol)
+            
+        selected_stock = st.selectbox("Search Ticker (Autocomplete)", 
+                                     popular_stocks, 
+                                     index=popular_stocks.index(st.session_state.current_symbol) if st.session_state.current_symbol in popular_stocks else 0,
+                                     placeholder="Type to search e.g. Reliance, Apple...",
+                                     key="stock_search_main")
         
-        if losers:
-            st.write("📉 **Top Losers**")
-            for l in losers[:5]:
-                if st.button(f"{l['symbol']} ({l['change']:.1f}%)", key=f"btn_lose_{l['symbol']}", use_container_width=True):
-                    set_symbol(l['symbol'])
+        if selected_stock and selected_stock != st.session_state.current_symbol:
+            st.session_state.current_symbol = selected_stock
+            st.rerun()
+        
+        symbol = st.session_state.current_symbol
+        with st.spinner(f"Analysing {symbol}..."):
+            df = self.stock_fetcher.fetch_historical_data(symbol, period)
+            sentiment, news = self.stock_fetcher.fetch_news_sentiment(symbol)
+        
+        if df is not None:
+            col1, col2 = st.columns([0.7, 0.3])
+            with col1:
+                pred, reason = self.predictor.predict(df, sentiment)
+                self.render_metrics(df)
+                self.render_prediction(pred, reason)
+                
+                t_tech, t_news = st.tabs(["📊 Technical Analysis", "📰 Intelligence Feed"])
+                with t_tech:
+                    fig = go.Figure(go.Scatter(x=df.index, y=df['Close'], line=dict(color='#00d1ff', width=2.5)))
+                    fig.update_layout(template="plotly_dark", height=400, margin=dict(t=10, b=0, l=0, r=0), 
+                                      paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
+                    st.plotly_chart(fig, width='stretch')
+                with t_news:
+                    self.render_news_feed(news)
+            with col2:
+                st.markdown("### 🔥 Trending")
+                
+                @st.cache_data(ttl=3600)
+                def get_cached_stocks():
+                    movers, _ = self.stock_fetcher.get_market_movers()
+                    return movers
+                
+                movers = get_cached_stocks()
+                for m in movers:
+                    if st.button(f"{m['symbol']} {m['change']:+}%", key=f"trend_{m['symbol']}", width="stretch"):
+                        # Priority fix: Delete the search widget key to force it to reset on rerun
+                        if "stock_search_main" in st.session_state:
+                            del st.session_state["stock_search_main"]
+                        st.session_state.current_symbol = m['symbol']
+                        st.rerun()
+                
+                # Tiny holdings preview for stocks (top sectors)
+                st.markdown("---")
+                try:
+                    info = yf.Ticker(symbol).info
+                    sector = info.get('sector', 'Unknown')
+                    industry = info.get('industry', 'Unknown')
+                    st.markdown(f"**Sector**: {sector}")
+                    st.markdown(f"**Industry**: {industry}")
+                except: pass
 
-# Sidebar footer
-st.sidebar.markdown("---")
-with st.sidebar.expander("🛠️ Diagnostics"):
-    st.write(f"V: {yf.__version__}")
-    if st.session_state.current_symbol:
-        st.write(f"Target: {st.session_state.current_symbol}")
-        try:
-            t = yf.Ticker(st.session_state.current_symbol)
-            raw = getattr(t, 'news', [])
-            st.write(f"Raw Items: {len(raw)}")
-        except Exception as ex:
-            st.write(f"Error: {ex}")
+        else: st.error(f"Data offline for {symbol}.")
+
+    def render_mf_module(self, period):
+        # Improved Search UI - Full schemes list for instant autocomplete
+        st.markdown("### 🏦 Mutual Fund Explorer")
+        
+        # Load all codes for autocomplete
+        if 'all_mf_options' not in st.session_state:
+            with st.spinner("Loading Fund Database..."):
+                all_schemes = self.mf_fetcher.mf.get_scheme_codes() if self.mf_fetcher.mf else {}
+                st.session_state.all_mf_options = [f"{name} ({code})" for code, name in all_schemes.items()]
+        
+        # Add popular US funds if not present
+        if not st.session_state.all_mf_options:
+            st.session_state.all_mf_options = ["Vanguard 500 Index (VFIAX)", "Fidelity 500 (FXAIX)"]
+
+        selected_fund = st.selectbox("Search Scheme (Autocomplete)", 
+                                    st.session_state.all_mf_options, 
+                                    index=None, 
+                                    placeholder="Type to search e.g. HDFC, Index, SBI...",
+                                    key="mf_autocomplete")
+        
+        if selected_fund:
+            new_code = selected_fund.split('(')[-1].strip(')')
+            if new_code != st.session_state.current_mf_code:
+                st.session_state.current_mf_code = new_code
+                st.rerun()
+
+        code = st.session_state.current_mf_code
+        with st.spinner(f"Analysing Fund {code}..."):
+            df = self.mf_fetcher.fetch_historical_data(code, period)
+            fund_name = code
+            if self.mf_fetcher.mf and code.isdigit():
+                try: fund_name = self.mf_fetcher.mf.get_scheme_details(code).get('scheme_name', code)
+                except: pass
+            sentiment, news = self.mf_fetcher.fetch_news_sentiment(code, company_name=fund_name)
+        
+        if df is not None:
+            col1, col2 = st.columns([0.65, 0.35])
+            with col1:
+                is_us = len(code) == 5 and code.endswith('X')
+                pred, reason = self.predictor.predict(df, sentiment)
+                
+                asset_label = "Equity" if "Equity" in fund_name else ("Debt" if "Debt" in fund_name else "Hybrid")
+                self.render_metrics(df, label="NAV", unit="$" if is_us else "₹", extra_metric=asset_label, extra_label="Fund Category")
+                self.render_prediction(pred, reason)
+                
+                t_nav, t_news = st.tabs(["📈 Price Performance", "📰 Fund Intel"])
+                with t_nav:
+                    fig = go.Figure(go.Scatter(x=df.index, y=df['Close'], line=dict(color='#00ff88', width=2.5)))
+                    fig.update_layout(template="plotly_dark", height=400, margin=dict(t=10, b=0, l=0, r=0), 
+                                      paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)')
+                    st.plotly_chart(fig, width='stretch')
+                with t_news:
+                    self.render_news_feed(news)
+            with col2:
+                self.render_diversification(code, fund_name)
+                
+                st.markdown("---")
+                st.markdown("### 🔥 Trending Funds")
+                
+                # Cache the real-time calculations to keep UI snappy
+                @st.cache_data(ttl=3600)
+                def get_cached_mfs():
+                    return self.mf_fetcher.get_trending_mfs()
+                
+                trending_mfs = get_cached_mfs()
+                for f in trending_mfs:
+                    if st.button(f"{f['name']} ({f['change']:+2}%)", key=f"trend_mf_{f['symbol']}", width="stretch"):
+                        # Priority fix: Delete the search widget key to force it to reset on rerun
+                        if "mf_autocomplete" in st.session_state:
+                            del st.session_state["mf_autocomplete"]
+                        st.session_state.current_mf_code = f['symbol']
+                        st.rerun()
+        else: st.error(f"Fund data {code} is temporarily restricted.")
+
+    def run(self):
+        self.apply_styles()
+        st.markdown("<h1 class='main-header'>FinSight Pro</h1>", unsafe_allow_html=True)
+        
+        # Tabs for Asset Selection
+        t_stocks, t_mfs = st.tabs(["📈 Stock Market", "🏦 Mutual Funds"])
+        
+        with st.sidebar:
+            st.markdown("### 📊 Horizon")
+            period = st.selectbox("Analysis Window", ["1mo", "3mo", "6mo", "1y", "2y"], index=0)
+            st.markdown("---")
+            st.caption("AI-Powered Sentiment & Technical Forecasting Engine.")
+        
+        with t_stocks:
+            self.render_stock_module(period)
+            
+        with t_mfs:
+            self.render_mf_module(period)
+
+@st.cache_resource
+def get_app(): return DashboardApp()
+
+if __name__ == "__main__":
+    get_app().run()

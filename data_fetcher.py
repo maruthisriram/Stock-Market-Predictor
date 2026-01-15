@@ -98,6 +98,8 @@ def fetch_news_sentiment(symbol):
                 link = link.get('url', '#')
             
             score = 0
+            reasoning = "Neutral sentiment indicates low immediate impact from this news."
+            
             if nlp:
                 # Meaning-aware analysis
                 try:
@@ -108,8 +110,10 @@ def fetch_news_sentiment(symbol):
                     
                     if label == 'positive':
                         score = confidence
+                        reasoning = f"Positive sentiment suggests this news could boost investor confidence or reflect strong growth."
                     elif label == 'negative':
                         score = -confidence
+                        reasoning = f"Negative sentiment indicates potential risks, bearish outlook, or market headwinds."
                     else:
                         score = 0
                 except:
@@ -122,9 +126,11 @@ def fetch_news_sentiment(symbol):
             sentiments.append(score)
             news_list.append({
                 'title': title,
+                'summary': summary,
                 'publisher': publisher,
                 'link': link,
-                'sentiment': score
+                'sentiment': score,
+                'reasoning': reasoning
             })
 
         avg_sentiment = sum(sentiments) / len(sentiments) if sentiments else 0

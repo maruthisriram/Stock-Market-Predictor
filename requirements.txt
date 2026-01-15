@@ -5,3 +5,5 @@ yfinance
 vaderSentiment
 transformers
 torch
+newspaper3k
+nltk

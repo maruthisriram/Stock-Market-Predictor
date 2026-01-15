@@ -67,10 +67,12 @@ st.title("📈 Stock Intelligence Dashboard")
 
 # Caching
 @st.cache_resource
-def load_finbert_model():
-    """Cache the FinBERT model across sessions and reruns."""
-    from data_fetcher import get_finbert_pipeline
-    return get_finbert_pipeline()
+def load_models():
+    """Cache the AI models across sessions and reruns."""
+    from data_fetcher import get_finbert_pipeline, get_summarizer_pipeline
+    get_finbert_pipeline()
+    get_summarizer_pipeline()
+    return True
 
 @st.cache_data(ttl=600)
 def get_cached_movers():
@@ -88,8 +90,8 @@ def get_cached_sectors():
 
 @st.cache_data(ttl=300)
 def get_cached_ticker_data(symbol, period):
-    # Pre-warm model cache
-    load_finbert_model()
+    # Pre-warm models cache
+    load_models()
     df = fetch_historical_data(symbol, period=period)
     avg_sent, news = fetch_news_sentiment(symbol)
     return df, avg_sent, news
@@ -164,13 +166,13 @@ with col_main:
                                 st.markdown(f"""
                                 <div class="news-item">
                                     <h4 style="margin:0;"><a href="{art['link']}" target="_blank" style="color:#00d1ff; text-decoration:none;">{art['title']}</a></h4>
-                                    <p style="font-size: 0.9rem; color: #ccc; margin: 10px 0;">{art['summary']}</p>
+                                    <p style="font-size: 0.9rem; color: #ccc; margin: 10px 0;"><b>Summary:</b> {art['summary']}</p>
                                     <div style="margin-top:5px; color:#888;">
                                         <span>{art['publisher']}</span> | 
-                                        <span>Sentiment Score: <b style="color:{color};">{art['sentiment']:.2f}</b></span>
+                                        <span>Confidence: <b style="color:{color};">{abs(art['sentiment']):.2f}</b></span>
                                     </div>
                                     <div style="margin-top:10px; padding: 5px 10px; background: rgba(0,209,255,0.1); border-radius: 5px; border-left: 3px solid #00d1ff;">
-                                        <span style="font-size: 0.85rem; color: #00d1ff;">💡 <b>AI Reasoning:</b> {art['reasoning']}</span>
+                                        <span style="font-size: 0.85rem; color: #00d1ff;">🎯 <b>Market Outlook:</b> {art['reasoning']}</span>
                                     </div>
                                 </div>
                                 """, unsafe_allow_html=True)

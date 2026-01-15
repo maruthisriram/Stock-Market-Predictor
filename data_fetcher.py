@@ -8,8 +8,16 @@ try:
 except ImportError:
     pipeline = None
 
+try:
+    from newspaper import Article
+    import nltk
+    nltk.download('punkt', quiet=True)
+except ImportError:
+    Article = None
+
 # Global model initialization for sentiment
 FINBERT_PIPE = None
+SUMMARIZER_PIPE = None
 
 def get_finbert_pipeline():
     global FINBERT_PIPE
@@ -23,6 +31,35 @@ def get_finbert_pipeline():
             print(f"Error loading FinBERT: {e}")
             return None
     return FINBERT_PIPE
+
+def get_summarizer_pipeline():
+    global SUMMARIZER_PIPE
+    if pipeline is None:
+        return None
+    if SUMMARIZER_PIPE is None:
+        try:
+            print("Initializing Summarizer model (Article Summarization)...")
+            # Using t5-small for speed and reasonable summaries
+            SUMMARIZER_PIPE = pipeline("summarization", model="t5-small")
+        except Exception as e:
+            print(f"Error loading Summarizer: {e}")
+            return None
+    return SUMMARIZER_PIPE
+
+def scrape_article_text(url):
+    """
+    Fetch and extract full text from an article URL using newspaper3k.
+    """
+    if Article is None:
+        return None
+    try:
+        article = Article(url)
+        article.download()
+        article.parse()
+        return article.text
+    except Exception as e:
+        print(f"Error scraping {url}: {e}")
+        return None
 
 def fetch_historical_data(symbol, period="1mo", interval="1d"):
     """
@@ -60,7 +97,7 @@ def search_stocks(query):
 
 def fetch_news_sentiment(symbol):
     """
-    Fetch recent news and calculate average sentiment score using FinBERT (meaning-aware).
+    Fetch recent news and calculate average sentiment score using full-article context and generate true summaries.
     """
     try:
         print(f"Fetching news for {symbol}...")
@@ -71,62 +108,79 @@ def fetch_news_sentiment(symbol):
             print(f"No news found for {symbol}.")
             return 0, []
 
-        # Try to get FinBERT pipeline
+        # Try to get models
         nlp = get_finbert_pipeline()
+        summarizer = get_summarizer_pipeline()
         vader_analyzer = SentimentIntensityAnalyzer() if nlp is None else None
         
         sentiments = []
         news_list = []
 
-        for article in news:
+        # Limit deep analysis to top 5 articles for performance
+        analysis_limit = 5
+        
+        for i, article in enumerate(news):
             content = article.get('content', {})
             data_source = content if content else article
 
             title = data_source.get('title') or article.get('title') or ""
-            summary = data_source.get('summary') or data_source.get('description') or ""
+            preview = data_source.get('summary') or data_source.get('description') or ""
             
             if not title:
                 continue
-                
-            # Combine title and summary for better context
-            combined_text = f"{title}. {summary}".strip()
             
             publisher = data_source.get('publisher') or article.get('publisher') or "Market News"
             link = data_source.get('link') or data_source.get('url') or "#"
-            
             if isinstance(link, dict):
                 link = link.get('url', '#')
+            
+            full_text = None
+            generated_summary = preview # Fallback to preview
+            
+            # Deep analysis for top articles
+            if i < analysis_limit and link != "#":
+                print(f"Deep analyzing article {i+1}: {title[:50]}...")
+                full_text = scrape_article_text(link)
+                
+                if full_text and len(full_text) > 100:
+                    # Generate a true summary if we have enough text
+                    if summarizer:
+                        try:
+                            # T5 needs 'summarize: ' prefix
+                            summary_input = f"summarize: {full_text[:1000]}"
+                            gen_sum = summarizer(summary_input, max_length=100, min_length=30, do_sample=False)
+                            generated_summary = gen_sum[0]['summary_text']
+                        except Exception as se:
+                            print(f"Summarization failed: {se}")
+            
+            # Use full text for sentiment if available, else combine title and preview
+            sentiment_input = full_text[:1500] if full_text else f"{title}. {preview}"
             
             score = 0
             reasoning = "Neutral sentiment indicates low immediate impact from this news."
             
             if nlp:
-                # Meaning-aware analysis
                 try:
-                    # Truncate text for Bert (max 512 tokens approx)
-                    result = nlp(combined_text[:500])[0]
-                    label = result['label'].lower() # positive, negative, neutral
+                    # Truncate for BERT limit
+                    result = nlp(sentiment_input[:512])[0]
+                    label = result['label'].lower()
                     confidence = result['score']
                     
                     if label == 'positive':
                         score = confidence
-                        reasoning = f"Positive sentiment suggests this news could boost investor confidence or reflect strong growth."
+                        reasoning = "The full article indicates a positive trend or strong growth potential."
                     elif label == 'negative':
                         score = -confidence
-                        reasoning = f"Negative sentiment indicates potential risks, bearish outlook, or market headwinds."
-                    else:
-                        score = 0
+                        reasoning = "The article content highlights significant risks or a bearish outlook."
                 except:
-                    # Fallback to VADER on title if model fails
                     score = SentimentIntensityAnalyzer().polarity_scores(title)['compound']
             else:
-                # Fallback to VADER
                 score = vader_analyzer.polarity_scores(title)['compound']
                 
             sentiments.append(score)
             news_list.append({
                 'title': title,
-                'summary': summary,
+                'summary': generated_summary, # Genuine summary
                 'publisher': publisher,
                 'link': link,
                 'sentiment': score,

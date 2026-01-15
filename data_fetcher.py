@@ -10,6 +10,11 @@ import xml.etree.ElementTree as ET
 import xml.etree.ElementTree as ET
 from html import unescape
 from io import StringIO
+import requests_cache
+from requests import Session
+from requests_cache import CachedSession
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 try:
     from transformers import pipeline
@@ -312,11 +317,54 @@ class StockFetcher(BaseFetcher):
 
 class MutualFundFetcher(BaseFetcher):
     _mf_instance = None
+    
+    def _create_robust_session(self):
+        """Creates a cached session with browser-like headers to bypass bot blocks"""
+        try:
+            session = CachedSession(
+                'mf_cache',
+                use_cache_dir=True,
+                cache_control=True,
+                expire_after=timedelta(hours=6), 
+                backend='sqlite'
+            )
+        except:
+             session = Session()
+
+        session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Referer': 'https://www.google.com/',
+            'Origin': 'https://www.google.com'
+        })
+        
+        retry = Retry(
+            total=5,
+            backoff_factor=1,
+            status_forcelist=[403, 429, 500, 502, 503, 504],
+            allowed_methods=["HEAD", "GET", "OPTIONS", "POST"]
+        )
+        adapter = HTTPAdapter(max_retries=retry)
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
+        return session
+
     def __init__(self):
         super().__init__()
         if Mftool and MutualFundFetcher._mf_instance is None:
             print("Initializing Mftool (Mutual Fund Data)...")
             MutualFundFetcher._mf_instance = Mftool()
+            
+            # Monkey-patch the session to be robust
+            # Crucial: Ensure this session replaces the internal requests session of mftool
+            try:
+                robust_session = self._create_robust_session()
+                MutualFundFetcher._mf_instance._session = robust_session
+                # Also patch requests directly in case mftool uses it directly somewhere
+                # (though looking at mftool source it uses self._session)
+            except Exception as e:
+                print(f"Failed to inject robust session into mftool: {e}")
+                
         self.mf = MutualFundFetcher._mf_instance
 
     def fetch_historical_data(self, identifier, period="1mo", interval="1d"):

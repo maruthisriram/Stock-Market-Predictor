@@ -7,3 +7,5 @@ transformers
 torch
 newspaper3k
 nltk
+requests-cache
+requests-ratelimiter

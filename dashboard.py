@@ -7,8 +7,38 @@ from predictor import StockPredictor
 import yfinance as yf
 from datetime import datetime
 
+import requests_cache
+from requests import Session
+from requests_cache import CachedSession
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
 # Page Config
 st.set_page_config(page_title="FinSight Pro: Wealth Intelligence", layout="wide", page_icon="📈")
+
+@st.cache_resource
+def get_yfinance_session():
+    """Create a smart session with caching and rate-limiting to avoid YFRateLimitError"""
+    try:
+        session = CachedSession(
+            'yfinance_cache',
+            use_cache_dir=True,
+            cache_control=True,
+            expire_after=datetime.timedelta(hours=1),
+            backend='sqlite'
+        )
+    except:
+        session = Session() # Fallback if caching fails (e.g. filesystem permissions)
+
+    # Add headers to mimic a browser
+    session.headers['User-Agent'] = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+    
+    # Retry logic for rate limits
+    retry = Retry(connect=3, backoff_factor=1)
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount('http://', adapter)
+    session.mount('https://', adapter)
+    return session
 
 # Persistent State Initialization
 if 'current_symbol' not in st.session_state: st.session_state.current_symbol = "AAPL"
@@ -73,10 +103,23 @@ class DashboardApp:
         weights = None
         
         # Scenario 1: US Fund (yfinance)
+        # Scenario 1: US Fund (yfinance)
         if len(code) == 5 and code.endswith('X'):
-            ticker = yf.Ticker(code)
-            if hasattr(ticker, 'funds_data'):
-                weights = ticker.funds_data.sector_weightings
+            try:
+                # Use our cached session to prevent rate limits
+                session = get_yfinance_session()
+                ticker = yf.Ticker(code, session=session)
+                
+                # yfinance propertry access triggering network request
+                if hasattr(ticker, 'funds_data'):
+                    # This call can trigger RateLimitError in cloud
+                    fd = ticker.funds_data
+                    if fd:
+                        weights = fd.sector_weightings
+            except Exception as e:
+                # Log error but don't crash. Fallback to category weights below.
+                print(f"Diversification fetch failed for {code}: {e}")
+                weights = None
         
         # Scenario 2: Indian Fund (Category Fallback)
         if not weights:
@@ -231,7 +274,11 @@ class DashboardApp:
             df = self.mf_fetcher.fetch_historical_data(code, period)
             fund_name = code
             if self.mf_fetcher.mf and code.isdigit():
-                try: fund_name = self.mf_fetcher.mf.get_scheme_details(code).get('scheme_name', code)
+                try: 
+                    # Handle potential 'restricted' API error gracefully
+                    details = self.mf_fetcher.mf.get_scheme_details(code)
+                    if details and isinstance(details, dict):
+                        fund_name = details.get('scheme_name', code)
                 except: pass
             sentiment, news = self.mf_fetcher.fetch_news_sentiment(code, company_name=fund_name)
         

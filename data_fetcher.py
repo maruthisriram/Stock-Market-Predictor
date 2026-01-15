@@ -28,10 +28,6 @@ try:
 except ImportError:
     Article = None
 
-try:
-    from mftool import Mftool
-except ImportError:
-    Mftool = None
 
 class BaseFetcher(ABC):
     """Abstract base class for all data fetchers"""
@@ -316,75 +312,74 @@ class StockFetcher(BaseFetcher):
             return [], []
 
 class MutualFundFetcher(BaseFetcher):
-    _mf_instance = None
+    _all_schemes_cache = None
     
-    def _create_robust_session(self):
-        """Creates a cached session with browser-like headers to bypass bot blocks"""
-        try:
-            session = CachedSession(
-                'mf_cache',
-                use_cache_dir=True,
-                cache_control=True,
-                expire_after=timedelta(hours=6), 
-                backend='sqlite'
-            )
-        except:
-             session = Session()
-
-        session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Referer': 'https://www.google.com/',
-            'Origin': 'https://www.google.com'
-        })
-        
-        retry = Retry(
-            total=5,
-            backoff_factor=1,
-            status_forcelist=[403, 429, 500, 502, 503, 504],
-            allowed_methods=["HEAD", "GET", "OPTIONS", "POST"]
-        )
-        adapter = HTTPAdapter(max_retries=retry)
-        session.mount("https://", adapter)
-        session.mount("http://", adapter)
-        return session
-
     def __init__(self):
         super().__init__()
-        if Mftool and MutualFundFetcher._mf_instance is None:
-            print("Initializing Mftool (Mutual Fund Data)...")
-            MutualFundFetcher._mf_instance = Mftool()
+        # No more mftool or complex session patching needed for public API
+        
+    def get_all_schemes(self):
+        """Fetch and cache the master list of all mutual funds"""
+        if MutualFundFetcher._all_schemes_cache:
+            return MutualFundFetcher._all_schemes_cache
             
-            # Monkey-patch the session to be robust
-            # Crucial: Ensure this session replaces the internal requests session of mftool
-            try:
-                robust_session = self._create_robust_session()
-                MutualFundFetcher._mf_instance._session = robust_session
-                # Also patch requests directly in case mftool uses it directly somewhere
-                # (though looking at mftool source it uses self._session)
-            except Exception as e:
-                print(f"Failed to inject robust session into mftool: {e}")
-                
-        self.mf = MutualFundFetcher._mf_instance
+        try:
+            url = "https://api.mfapi.in/mf"
+            response = requests.get(url)
+            if response.status_code == 200:
+                # API returns list of dicts: [{'schemeCode': 100027, 'schemeName': '...'}, ...]
+                schemes = response.json()
+                # Convert to dict format {code: name} for compatibility
+                mf_dict = {str(s['schemeCode']): s['schemeName'] for s in schemes}
+                MutualFundFetcher._all_schemes_cache = mf_dict
+                return mf_dict
+        except Exception as e:
+            print(f"Error fetching MF master list: {e}")
+            
+        return {}
+
+    def get_fund_details(self, code):
+        """Fetch fund meta data"""
+        try:
+            url = f"https://api.mfapi.in/mf/{code}"
+            response = requests.get(url)
+            if response.status_code == 200:
+                return response.json().get('meta', {})
+        except: pass
+        return {}
 
     def fetch_historical_data(self, identifier, period="1mo", interval="1d"):
+        # US Funds Support
         if len(identifier) == 5 and identifier.endswith('X'):
             try:
                 ticker = yf.Ticker(identifier)
                 df = ticker.history(period=period, interval=interval)
                 return df if not df.empty else None
             except: return None
-        if self.mf and identifier.isdigit():
+            
+        # Indian Mutual Funds via api.mfapi.in
+        if identifier.isdigit():
             try:
-                data = self.mf.get_scheme_historical_nav(identifier, as_Dataframe=True)
-                if data is None or data.empty: return None
-                df = data.rename(columns={'nav': 'Close'})
+                url = f"https://api.mfapi.in/mf/{identifier}"
+                response = requests.get(url)
+                if response.status_code != 200: return None
+                
+                data = response.json().get('data', [])
+                if not data: return None
+                
+                df = pd.DataFrame(data)
+                df['date'] = pd.to_datetime(df['date'], format='%d-%m-%Y')
+                df.set_index('date', inplace=True)
+                df.rename(columns={'nav': 'Close'}, inplace=True)
                 df['Close'] = pd.to_numeric(df['Close'], errors='coerce')
                 df = df.dropna(subset=['Close'])
-                df.index = pd.to_datetime(df.index, dayfirst=True)
                 df = df.sort_index()
-                days = {"1mo": 30, "3mo": 90, "6mo": 180, "1y": 365}.get(period, 30)
-                df = df[df.index > (df.index.max() - timedelta(days=days))]
+                
+                # Filter by period
+                days = {"1mo": 30, "3mo": 90, "6mo": 180, "1y": 365, "5y": 1825, "max": 10000}.get(period, 30)
+                cutoff_date = df.index.max() - timedelta(days=days)
+                df = df[df.index > cutoff_date]
+                
                 return df
             except Exception as e:
                 print(f"Error fetching Indian MF data: {e}")
@@ -392,48 +387,34 @@ class MutualFundFetcher(BaseFetcher):
         return None
 
     def get_trending_mfs(self):
-        """Fetch true top-performing funds by dynamically scanning API-listed schemes."""
+        """Fetch top-performing funds by scanning the public API list."""
         try:
-            if not self.mf:
-                return [{'name': 'Mftool Offline', 'symbol': '000000', 'change': 0}]
-            
-            # Step 1: Get ALL available scheme codes from the API
-            # This is a dynamic call, returns dict {code: name}
-            all_schemes = self.mf.get_scheme_codes()
-            
-            if not all_schemes:
-                return []
+            all_schemes = self.get_all_schemes()
+            if not all_schemes: return []
                 
-            # Step 2: Dynamically filter for liquid/popular categories (Index, Bluechip, Nifty)
-            # This replaces hardcoded IDs with dynamic search
+            # Filter for candidates
             candidates = []
             keywords = ['Nifty 50 Index', 'Bluechip Fund', 'Large Cap']
             
             for code, name in all_schemes.items():
                 name_lower = name.lower()
-                # strict filter to avoid 15000 checks, just get 20 good candidates
                 if any(k.lower() in name_lower for k in keywords) and 'Direct' in name and 'Growth' in name:
                      candidates.append({'code': code, 'name': name})
-                     if len(candidates) >= 15: # Limit candidate pool for performance
+                     if len(candidates) >= 15: 
                          break
             
-            # Step 3: Calculate performance for these dynamically found candidates
+            # Calculate performance
             results = []
             for item in candidates:
                 try:
-                    code = item['code']
-                    name = item['name']
-                    
-                    df = self.fetch_historical_data(code, period="1mo")
+                    df = self.fetch_historical_data(item['code'], period="1mo")
                     if df is not None and not df.empty and len(df) >= 2:
                         latest = df['Close'].iloc[-1]
                         prev = df['Close'].iloc[-2]
                         change = ((latest - prev) / prev) * 100
-                        
-                        results.append({'name': name, 'symbol': code, 'change': round(change, 2)})
+                        results.append({'name': item['name'], 'symbol': item['code'], 'change': round(change, 2)})
                 except: continue
                 
-            # Step 4: Return top performing ones
             return sorted(results, key=lambda x: x['change'], reverse=True)[:5]
             
         except Exception as e:
@@ -441,23 +422,27 @@ class MutualFundFetcher(BaseFetcher):
             return []
 
     def search(self, query):
-        if not self.mf: return []
         try:
-            all_schemes = self.mf.get_scheme_codes()
+            all_schemes = self.get_all_schemes()
             results = []
             query_lower = query.lower()
             count = 0
+            
+            # Local search in cached master list
             for code, name in all_schemes.items():
                 if query_lower in name.lower():
                     results.append({'symbol': code, 'name': name})
                     count += 1
                     if count >= 8: break
+                    
+            # US Funds Fallback
             us_search = yf.Search(query + " Mutual Fund")
             for quote in getattr(us_search, 'quotes', []):
                 symbol = quote.get('symbol')
                 if symbol and symbol.endswith('X'):
                     results.append({'symbol': symbol, 'name': quote.get('shortname', symbol)})
                     if len(results) >= 12: break
+                    
             return results
         except: return []
 

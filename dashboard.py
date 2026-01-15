@@ -250,7 +250,7 @@ class DashboardApp:
         # Load all codes for autocomplete
         if 'all_mf_options' not in st.session_state:
             with st.spinner("Loading Fund Database..."):
-                all_schemes = self.mf_fetcher.mf.get_scheme_codes() if self.mf_fetcher.mf else {}
+                all_schemes = self.mf_fetcher.get_all_schemes()
                 st.session_state.all_mf_options = [f"{name} ({code})" for code, name in all_schemes.items()]
         
         # Add popular US funds if not present
@@ -273,12 +273,11 @@ class DashboardApp:
         with st.spinner(f"Analysing Fund {code}..."):
             df = self.mf_fetcher.fetch_historical_data(code, period)
             fund_name = code
-            if self.mf_fetcher.mf and code.isdigit():
+            if code.isdigit():
                 try: 
-                    # Handle potential 'restricted' API error gracefully
-                    details = self.mf_fetcher.mf.get_scheme_details(code)
-                    if details and isinstance(details, dict):
-                        fund_name = details.get('scheme_name', code)
+                    # Use new helper method instead of direct MF object access
+                    meta = self.mf_fetcher.get_fund_details(code)
+                    fund_name = meta.get('scheme_name', code)
                 except: pass
             sentiment, news = self.mf_fetcher.fetch_news_sentiment(code, company_name=fund_name)
         
